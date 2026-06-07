@@ -3,7 +3,7 @@ import { useLocation, useRoute } from "wouter";
 import { signOut } from "firebase/auth";
 import {
   collection, addDoc, query, orderBy, onSnapshot,
-  serverTimestamp, limit, doc, setDoc, updateDoc, Timestamp,
+  serverTimestamp, limit, doc, setDoc, updateDoc, deleteDoc, Timestamp,
 } from "firebase/firestore";
 import { ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
 import { auth, db, storage } from "@/lib/firebase";
@@ -13,16 +13,22 @@ import { useUserProfiles } from "@/hooks/use-user-profiles";
 import { useRoomActivity } from "@/hooks/use-room-activity";
 import { useFcm } from "@/hooks/use-fcm";
 import { ReactionBar, ReactionChips } from "@/components/reaction-bar";
+import { MessageContextMenu } from "@/components/message-context-menu";
 import type { UserProfile } from "@/hooks/use-user-profiles";
 import { format, isToday, isYesterday } from "date-fns";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle,
+  DialogDescription, DialogFooter,
+} from "@/components/ui/dialog";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { LogOut, Send, MessageCircle, Plus, Hash, ImageIcon, Menu, X, Camera, Bell, BellOff } from "lucide-react";
+import {
+  LogOut, Send, MessageCircle, Plus, Hash, ImageIcon, Menu, X, Camera, Bell,
+} from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -48,8 +54,11 @@ interface Message {
   uid: string;
   email: string;
   createdAt: Timestamp | null;
+  editedAt?: Timestamp | null;
   reactions?: Record<string, Record<string, boolean>>;
 }
+
+type ContextMenuState = { x: number; y: number; msg: Message } | null;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -77,7 +86,10 @@ function formatDateDivider(ts: Timestamp | null): string {
   return format(d, "MMMM d, yyyy");
 }
 
-function isSameDay(a: Timestamp | null | undefined, b: Timestamp | null | undefined): boolean {
+function isSameDay(
+  a: Timestamp | null | undefined,
+  b: Timestamp | null | undefined,
+): boolean {
   if (!a?.toDate || !b?.toDate) return true;
   return a.toDate().toDateString() === b.toDate().toDateString();
 }
@@ -155,7 +167,7 @@ function UserAvatar({
   );
 }
 
-// ─── Sidebar Skeletons ────────────────────────────────────────────────────────
+// ─── Skeletons ────────────────────────────────────────────────────────────────
 
 function SidebarSkeletons() {
   return (
@@ -175,8 +187,6 @@ function SidebarSkeletons() {
     </div>
   );
 }
-
-// ─── Message Skeletons ────────────────────────────────────────────────────────
 
 function MessageSkeletons() {
   return (
@@ -237,8 +247,7 @@ function Sidebar({
             <span className="font-bold text-sidebar-foreground tracking-tight text-lg">Gather</span>
           </div>
           <div className="flex items-center gap-1">
-            {/* Notification bell */}
-            {notifPermission !== "granted" && (
+            {notifPermission !== "granted" ? (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
@@ -250,8 +259,7 @@ function Sidebar({
                 </TooltipTrigger>
                 <TooltipContent side="bottom">Enable push notifications</TooltipContent>
               </Tooltip>
-            )}
-            {notifPermission === "granted" && (
+            ) : (
               <span title="Notifications enabled" className="w-7 h-7 flex items-center justify-center text-emerald-400">
                 <Bell className="w-3.5 h-3.5" />
               </span>
@@ -262,7 +270,7 @@ function Sidebar({
           </div>
         </div>
 
-        {/* Online pill */}
+        {/* Online count */}
         {onlineCount > 0 && (
           <div className="px-5 py-2 text-xs text-sidebar-foreground/50 flex items-center gap-1.5 border-b border-sidebar-border/40">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block animate-pulse" />
@@ -293,13 +301,12 @@ function Sidebar({
                 const isActive = activeRoomId === room.id;
                 const lastSeen = roomActivity[room.id]?.lastSeen ?? null;
                 const hasUnread = !isActive && isUnread(room.lastMessage, lastSeen);
-
                 return (
                   <button
                     key={room.id}
                     data-testid={`button-room-${room.id}`}
                     onClick={() => { onSelectRoom(room.id); onClose(); }}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm transition-colors text-left group ${
+                    className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm transition-colors text-left ${
                       isActive
                         ? "bg-sidebar-primary text-sidebar-primary-foreground"
                         : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground"
@@ -342,14 +349,10 @@ function Sidebar({
                   </button>
                 );
               })}
-
               {rooms.length === 0 && (
                 <div className="px-3 py-6 text-center">
                   <p className="text-xs text-sidebar-foreground/40 italic">No rooms yet</p>
-                  <button
-                    onClick={onCreateRoom}
-                    className="mt-2 text-xs text-primary hover:underline"
-                  >
+                  <button onClick={onCreateRoom} className="mt-2 text-xs text-primary hover:underline">
                     Create your first room →
                   </button>
                 </div>
@@ -392,6 +395,58 @@ function Sidebar({
   );
 }
 
+// ─── Inline Edit Input ────────────────────────────────────────────────────────
+
+function InlineEditInput({
+  initialText, onSave, onCancel,
+}: {
+  initialText: string; onSave: (text: string) => void; onCancel: () => void;
+}) {
+  const [value, setValue] = useState(initialText);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = value.trim();
+    if (trimmed && trimmed !== initialText) onSave(trimmed);
+    else onCancel();
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="flex flex-col gap-1.5 w-full min-w-[200px] max-w-xs">
+      <Input
+        ref={inputRef}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}
+        className="text-[15px] h-9 px-3 rounded-xl border-primary/40 focus-visible:ring-primary/30"
+      />
+      <div className="flex gap-1.5">
+        <Button
+          type="submit" size="sm"
+          disabled={!value.trim() || value.trim() === initialText}
+          className="h-7 text-xs rounded-lg px-3"
+        >
+          Save
+        </Button>
+        <Button
+          type="button" size="sm" variant="ghost"
+          onClick={onCancel}
+          className="h-7 text-xs rounded-lg px-3"
+        >
+          Cancel
+        </Button>
+      </div>
+      <p className="text-[10px] text-muted-foreground/60">Esc to cancel</p>
+    </form>
+  );
+}
+
 // ─── Message Area ─────────────────────────────────────────────────────────────
 
 function MessageArea({
@@ -405,14 +460,30 @@ function MessageArea({
   const [loadingMessages, setLoadingMessages] = useState(true);
   const [newMessage, setNewMessage] = useState("");
   const [uploading, setUploading] = useState(false);
+
+  // Context menu
+  const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
+
+  // Reaction hover
   const [hoveredMsgId, setHoveredMsgId] = useState<string | null>(null);
+
+  // Edit state
+  const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
+
+  // Delete confirmation
+  const [deletingMsg, setDeletingMsg] = useState<Message | null>(null);
+  const [deleteInProgress, setDeleteInProgress] = useState(false);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     setMessages([]);
     setLoadingMessages(true);
+    setEditingMsgId(null);
+    setContextMenu(null);
     const q = query(
       collection(db, "rooms", roomId, "messages"),
       orderBy("createdAt", "desc"),
@@ -430,10 +501,11 @@ function MessageArea({
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Re-focus input after upload
   useEffect(() => {
     if (!uploading) inputRef.current?.focus();
   }, [uploading]);
+
+  // ── Send ──────────────────────────────────────────────────────────────────
 
   const sendText = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -464,10 +536,78 @@ function MessageArea({
     }
   };
 
+  // ── Edit ──────────────────────────────────────────────────────────────────
+
+  const handleEditSave = async (msgId: string, newText: string) => {
+    await updateDoc(doc(db, "rooms", roomId, "messages", msgId), {
+      text: newText,
+      editedAt: serverTimestamp(),
+    });
+    setEditingMsgId(null);
+  };
+
+  // ── Delete ────────────────────────────────────────────────────────────────
+
+  const handleDeleteConfirm = async () => {
+    if (!deletingMsg) return;
+    setDeleteInProgress(true);
+    await deleteDoc(doc(db, "rooms", roomId, "messages", deletingMsg.id));
+    setDeleteInProgress(false);
+    setDeletingMsg(null);
+  };
+
+  // ── Context menu triggers ─────────────────────────────────────────────────
+
+  const openMenu = (x: number, y: number, msg: Message) => {
+    if (msg.uid !== user.uid) return;
+    setHoveredMsgId(null);
+    setContextMenu({ x, y, msg });
+  };
+
+  const handleRightClick = (e: React.MouseEvent, msg: Message) => {
+    if (msg.uid !== user.uid) return;
+    e.preventDefault();
+    openMenu(e.clientX, e.clientY, msg);
+  };
+
+  const handleTouchStart = (e: React.TouchEvent, msg: Message) => {
+    if (msg.uid !== user.uid) return;
+    const touch = e.touches[0];
+    longPressTimer.current = setTimeout(() => {
+      openMenu(touch.clientX, touch.clientY, msg);
+    }, 500);
+  };
+
+  const handleTouchEnd = () => {
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+  };
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
   if (loadingMessages) return <MessageSkeletons />;
 
   return (
     <>
+      {contextMenu && (
+        <MessageContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          canEdit={!!contextMenu.msg.text}
+          onEdit={() => {
+            setEditingMsgId(contextMenu.msg.id);
+            setContextMenu(null);
+          }}
+          onDelete={() => {
+            setDeletingMsg(contextMenu.msg);
+            setContextMenu(null);
+          }}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
+
       <div className="flex-1 overflow-y-auto p-4 px-4 md:px-6 flex flex-col space-y-1 bg-card/20">
         {messages.length === 0 && (
           <div className="flex-1 flex items-center justify-center flex-col gap-2 text-center">
@@ -487,6 +627,7 @@ function MessageArea({
           const isLastInGroup = !next || next.uid !== msg.uid || !isSameDay(msg.createdAt, next?.createdAt);
           const senderProfile = profiles[msg.uid];
           const isHovered = hoveredMsgId === msg.id;
+          const isEditing = editingMsgId === msg.id;
 
           return (
             <div key={msg.id}>
@@ -503,19 +644,25 @@ function MessageArea({
               <div
                 className={`flex gap-2.5 ${isMe ? "flex-row-reverse" : "flex-row"} ${isFirstInGroup ? "mt-3" : "mt-0.5"}`}
                 data-testid={`message-${msg.id}`}
-                onMouseEnter={() => setHoveredMsgId(msg.id)}
+                onMouseEnter={() => !isEditing && setHoveredMsgId(msg.id)}
                 onMouseLeave={() => setHoveredMsgId(null)}
+                onContextMenu={(e) => handleRightClick(e, msg)}
+                onTouchStart={(e) => handleTouchStart(e, msg)}
+                onTouchEnd={handleTouchEnd}
+                onTouchMove={handleTouchEnd}
               >
+                {/* Avatar column */}
                 {!isMe ? (
                   <div className="w-9 shrink-0 flex items-end">
                     {isLastInGroup
-                      ? <UserAvatar profile={senderProfile} email={msg.email} uid={msg.uid} size="md" />
+                      ? <UserAvatar profile={senderProfile} email={msg.email} uid={msg.uid} />
                       : <div className="w-9" />}
                   </div>
                 ) : (
                   <div className="w-9 shrink-0" />
                 )}
 
+                {/* Content column */}
                 <div className={`flex flex-col max-w-[70%] md:max-w-[60%] ${isMe ? "items-end" : "items-start"}`}>
                   {!isMe && isFirstInGroup && (
                     <span className="text-xs font-medium text-muted-foreground mb-1 ml-1">
@@ -523,42 +670,59 @@ function MessageArea({
                     </span>
                   )}
 
-                  {/* Bubble + reaction picker */}
-                  <div className="relative">
-                    <ReactionBar
-                      roomId={roomId} msgId={msg.id} uid={user.uid}
-                      reactions={msg.reactions} isMe={isMe} visible={isHovered}
+                  {/* Bubble / edit input */}
+                  {isEditing ? (
+                    <InlineEditInput
+                      initialText={msg.text ?? ""}
+                      onSave={(text) => handleEditSave(msg.id, text)}
+                      onCancel={() => setEditingMsgId(null)}
                     />
+                  ) : (
+                    <div className="relative">
+                      {/* Reaction picker (hover) */}
+                      <ReactionBar
+                        roomId={roomId} msgId={msg.id} uid={user.uid}
+                        reactions={msg.reactions} isMe={isMe} visible={isHovered && !contextMenu}
+                      />
 
-                    {msg.imageURL ? (
-                      <a href={msg.imageURL} target="_blank" rel="noopener noreferrer">
-                        <img
-                          src={msg.imageURL} alt="Shared image"
-                          className="max-w-[240px] md:max-w-xs rounded-2xl shadow-sm border border-border/30 object-cover"
-                          style={{ maxHeight: 300 }}
-                        />
-                      </a>
-                    ) : (
-                      <div className={`px-4 py-2.5 text-[15px] leading-relaxed shadow-sm ${
-                        isMe
-                          ? "bg-primary text-primary-foreground rounded-2xl rounded-tr-sm"
-                          : "bg-card border border-border/50 text-foreground rounded-2xl rounded-tl-sm"
-                      }`}>
-                        {msg.text}
-                      </div>
-                    )}
-                  </div>
+                      {msg.imageURL ? (
+                        <a href={msg.imageURL} target="_blank" rel="noopener noreferrer">
+                          <img
+                            src={msg.imageURL} alt="Shared image"
+                            className="max-w-[240px] md:max-w-xs rounded-2xl shadow-sm border border-border/30 object-cover"
+                            style={{ maxHeight: 300 }}
+                          />
+                        </a>
+                      ) : (
+                        <div className={`px-4 py-2.5 text-[15px] leading-relaxed shadow-sm select-none md:select-text ${
+                          isMe
+                            ? "bg-primary text-primary-foreground rounded-2xl rounded-tr-sm"
+                            : "bg-card border border-border/50 text-foreground rounded-2xl rounded-tl-sm"
+                        }`}>
+                          {msg.text}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Reaction chips */}
-                  <ReactionChips
-                    roomId={roomId} msgId={msg.id}
-                    uid={user.uid} reactions={msg.reactions}
-                  />
+                  {!isEditing && (
+                    <ReactionChips
+                      roomId={roomId} msgId={msg.id}
+                      uid={user.uid} reactions={msg.reactions}
+                    />
+                  )}
 
-                  {isLastInGroup && (
-                    <span className="text-[11px] text-muted-foreground/60 mt-1 mx-1">
-                      {formatTimestamp(msg.createdAt)}
-                    </span>
+                  {/* Timestamp + edited label */}
+                  {isLastInGroup && !isEditing && (
+                    <div className="flex items-center gap-1.5 mt-1 mx-1">
+                      {msg.editedAt && (
+                        <span className="text-[11px] text-muted-foreground/50 italic">edited</span>
+                      )}
+                      <span className="text-[11px] text-muted-foreground/60">
+                        {formatTimestamp(msg.createdAt)}
+                      </span>
+                    </div>
                   )}
                 </div>
               </div>
@@ -568,7 +732,7 @@ function MessageArea({
         <div ref={scrollRef} className="h-px" />
       </div>
 
-      {/* Input */}
+      {/* Message input */}
       <div className="p-3 px-4 md:px-6 bg-background border-t shrink-0">
         {uploading && (
           <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2 px-1">
@@ -607,6 +771,45 @@ function MessageArea({
           </div>
         </form>
       </div>
+
+      {/* Delete confirmation modal */}
+      <Dialog open={!!deletingMsg} onOpenChange={(open) => { if (!open) setDeletingMsg(null); }}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Delete this message?</DialogTitle>
+            <DialogDescription>
+              This will permanently remove the message. This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          {deletingMsg?.text && (
+            <div className="rounded-xl bg-muted/50 border border-border/50 px-4 py-3 text-sm text-foreground/70 italic line-clamp-3">
+              "{deletingMsg.text}"
+            </div>
+          )}
+          {deletingMsg?.imageURL && (
+            <div className="text-sm text-muted-foreground flex items-center gap-2">
+              <span>📷</span> Image message
+            </div>
+          )}
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setDeletingMsg(null)}
+              disabled={deleteInProgress}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDeleteConfirm}
+              disabled={deleteInProgress}
+              data-testid="button-confirm-delete"
+            >
+              {deleteInProgress ? "Deleting…" : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
@@ -647,7 +850,6 @@ export default function Chat() {
     return () => unsub();
   }, [user, activeRoomId, setLocation]);
 
-  // Mark room as read when opening it
   useEffect(() => {
     if (!activeRoomId || !user) return;
     setDoc(
@@ -780,6 +982,7 @@ export default function Chat() {
         )}
       </main>
 
+      {/* Create room dialog */}
       <Dialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
