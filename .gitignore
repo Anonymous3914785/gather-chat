@@ -47,3 +47,23 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Environment files — never commit secrets
+.env
+.env.local
+.env.*.local
+
+# Firebase local emulator
+.firebase/
+firebase-debug.log
+firestore-debug.log
+storage-debug.log
+ui-debug.log
+
+# Build artifacts
+artifacts/*/dist/
+
+# PWA generated assets
+artifacts/*/public/sw.js
+artifacts/*/public/workbox-*.js
+artifacts/*/public/registerSW.js
