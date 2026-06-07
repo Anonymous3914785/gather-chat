@@ -3,13 +3,14 @@ import { useLocation, useRoute } from "wouter";
 import { signOut } from "firebase/auth";
 import {
   collection, addDoc, query, orderBy, onSnapshot,
-  serverTimestamp, limit, doc, setDoc,
+  serverTimestamp, limit, doc, setDoc, updateDoc, Timestamp,
 } from "firebase/firestore";
 import { ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
 import { auth, db, storage } from "@/lib/firebase";
 import { useAuth } from "@/contexts/auth-context";
 import { usePresence } from "@/hooks/use-presence";
 import { useUserProfiles } from "@/hooks/use-user-profiles";
+import { useRoomActivity } from "@/hooks/use-room-activity";
 import type { UserProfile } from "@/hooks/use-user-profiles";
 import { format, isToday, isYesterday } from "date-fns";
 
@@ -22,44 +23,65 @@ import { LogOut, Send, MessageCircle, Plus, Hash, ImageIcon, Menu, X, Camera } f
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+interface LastMessage {
+  text?: string;
+  imageURL?: string;
+  uid: string;
+  email: string;
+  createdAt: Timestamp | null;
+}
+
+interface Room {
+  id: string;
+  name: string;
+  createdAt: Timestamp | null;
+  lastMessage?: LastMessage;
+}
+
 interface Message {
   id: string;
   text?: string;
   imageURL?: string;
   uid: string;
   email: string;
-  createdAt: any;
-}
-
-interface Room {
-  id: string;
-  name: string;
-  createdAt: any;
+  createdAt: Timestamp | null;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function formatTimestamp(ts: any): string {
+function formatTimestamp(ts: Timestamp | null): string {
   if (!ts?.toDate) return "";
-  const date = ts.toDate() as Date;
-  if (isToday(date)) return format(date, "h:mm a");
-  if (isYesterday(date)) return `Yesterday ${format(date, "h:mm a")}`;
-  return format(date, "MMM d, h:mm a");
+  const d = ts.toDate();
+  if (isToday(d)) return format(d, "h:mm a");
+  if (isYesterday(d)) return `Yesterday ${format(d, "h:mm a")}`;
+  return format(d, "MMM d, h:mm a");
 }
 
-function formatDateDivider(ts: any): string {
+function formatShortTime(ts: Timestamp | null | undefined): string {
   if (!ts?.toDate) return "";
-  const date = ts.toDate() as Date;
-  if (isToday(date)) return "Today";
-  if (isYesterday(date)) return "Yesterday";
-  return format(date, "MMMM d, yyyy");
+  const d = ts.toDate();
+  if (isToday(d)) return format(d, "h:mm a");
+  if (isYesterday(d)) return "Yesterday";
+  return format(d, "MMM d");
 }
 
-function isSameDay(a: any, b: any): boolean {
+function formatDateDivider(ts: Timestamp | null): string {
+  if (!ts?.toDate) return "";
+  const d = ts.toDate();
+  if (isToday(d)) return "Today";
+  if (isYesterday(d)) return "Yesterday";
+  return format(d, "MMMM d, yyyy");
+}
+
+function isSameDay(a: Timestamp | null | undefined, b: Timestamp | null | undefined): boolean {
   if (!a?.toDate || !b?.toDate) return true;
-  const da = a.toDate() as Date;
-  const db2 = b.toDate() as Date;
-  return da.toDateString() === db2.toDateString();
+  return a.toDate().toDateString() === b.toDate().toDateString();
+}
+
+function isUnread(lastMessage: LastMessage | undefined, lastSeen: Timestamp | null): boolean {
+  if (!lastMessage?.createdAt) return false;
+  if (!lastSeen) return true;
+  return lastMessage.createdAt.toMillis() > lastSeen.toMillis();
 }
 
 function avatarInitials(profile: UserProfile | undefined, email: string): string {
@@ -77,6 +99,13 @@ function avatarColor(uid: string): string {
   return colors[Math.abs(hash) % colors.length];
 }
 
+function lastMessagePreview(msg: LastMessage | undefined, myUid: string): string {
+  if (!msg) return "No messages yet";
+  const who = msg.uid === myUid ? "You" : msg.email.split("@")[0];
+  if (msg.imageURL) return `${who}: 📷 Image`;
+  return `${who}: ${msg.text ?? ""}`;
+}
+
 // ─── UserAvatar ───────────────────────────────────────────────────────────────
 
 function UserAvatar({
@@ -89,21 +118,11 @@ function UserAvatar({
   const fileRef = useRef<HTMLInputElement>(null);
   const sizeClass = size === "sm" ? "w-7 h-7 text-[10px]" : "w-9 h-9 text-[11px]";
 
-  const handleClick = () => {
-    if (clickable && onUpload) fileRef.current?.click();
-  };
-
-  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file && onUpload) onUpload(file);
-    e.target.value = "";
-  };
-
   return (
     <div className="relative shrink-0">
       <div
-        onClick={handleClick}
-        className={`${clickable ? "cursor-pointer group" : ""} relative`}
+        onClick={() => clickable && fileRef.current?.click()}
+        className={clickable ? "cursor-pointer group relative" : ""}
       >
         <Avatar className={sizeClass}>
           {profile?.photoURL && <AvatarImage src={profile.photoURL} alt={email} />}
@@ -118,14 +137,15 @@ function UserAvatar({
         )}
       </div>
       {showOnline && (
-        <span
-          className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-sidebar ${
-            profile?.online ? "bg-emerald-400" : "bg-muted-foreground/40"
-          }`}
-        />
+        <span className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-sidebar ${
+          profile?.online ? "bg-emerald-400" : "bg-muted-foreground/30"
+        }`} />
       )}
       {clickable && onUpload && (
-        <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handleFile} />
+        <input
+          ref={fileRef} type="file" accept="image/*" className="hidden"
+          onChange={(e) => { const f = e.target.files?.[0]; if (f) onUpload(f); e.target.value = ""; }}
+        />
       )}
     </div>
   );
@@ -134,12 +154,13 @@ function UserAvatar({
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 
 function Sidebar({
-  rooms, activeRoomId, profiles, currentUser, onSelectRoom, onCreateRoom, onSignOut,
-  onAvatarUpload, open, onClose,
+  rooms, activeRoomId, profiles, currentUser, roomActivity, onSelectRoom,
+  onCreateRoom, onSignOut, onAvatarUpload, open, onClose,
 }: {
   rooms: Room[]; activeRoomId: string | null;
   profiles: Record<string, UserProfile>;
   currentUser: any;
+  roomActivity: Record<string, { lastSeen: Timestamp | null }>;
   onSelectRoom: (id: string) => void;
   onCreateRoom: () => void;
   onSignOut: () => void;
@@ -152,23 +173,16 @@ function Sidebar({
 
   return (
     <>
-      {/* Mobile overlay */}
       {open && (
-        <div
-          className="fixed inset-0 bg-black/40 z-20 md:hidden"
-          onClick={onClose}
-        />
+        <div className="fixed inset-0 bg-black/40 z-20 md:hidden" onClick={onClose} />
       )}
-
-      <aside
-        className={`
-          fixed md:relative z-30 md:z-auto inset-y-0 left-0
-          w-64 shrink-0 flex flex-col bg-sidebar border-r border-sidebar-border h-full
-          transition-transform duration-200
-          ${open ? "translate-x-0" : "-translate-x-full md:translate-x-0"}
-        `}
-      >
-        {/* Header */}
+      <aside className={`
+        fixed md:relative z-30 md:z-auto inset-y-0 left-0
+        w-72 shrink-0 flex flex-col bg-sidebar border-r border-sidebar-border h-full
+        transition-transform duration-200
+        ${open ? "translate-x-0" : "-translate-x-full md:translate-x-0"}
+      `}>
+        {/* Logo */}
         <div className="flex items-center justify-between px-5 h-16 border-b border-sidebar-border shrink-0">
           <div className="flex items-center gap-2.5">
             <div className="w-7 h-7 bg-primary text-primary-foreground rounded-lg flex items-center justify-center">
@@ -176,18 +190,15 @@ function Sidebar({
             </div>
             <span className="font-bold text-sidebar-foreground tracking-tight text-lg">Gather</span>
           </div>
-          <button
-            onClick={onClose}
-            className="md:hidden text-sidebar-foreground/50 hover:text-sidebar-foreground"
-          >
+          <button onClick={onClose} className="md:hidden text-sidebar-foreground/50 hover:text-sidebar-foreground">
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Online count */}
+        {/* Online pill */}
         {onlineCount > 0 && (
-          <div className="px-5 py-2 text-xs text-sidebar-foreground/50 flex items-center gap-1.5 border-b border-sidebar-border/50">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
+          <div className="px-5 py-2 text-xs text-sidebar-foreground/50 flex items-center gap-1.5 border-b border-sidebar-border/40">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block animate-pulse" />
             {onlineCount} online now
           </div>
         )}
@@ -208,21 +219,65 @@ function Sidebar({
           </div>
 
           <div className="space-y-0.5">
-            {rooms.map((room) => (
-              <button
-                key={room.id}
-                data-testid={`button-room-${room.id}`}
-                onClick={() => { onSelectRoom(room.id); onClose(); }}
-                className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors text-left ${
-                  activeRoomId === room.id
-                    ? "bg-sidebar-primary text-sidebar-primary-foreground font-medium"
-                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground"
-                }`}
-              >
-                <Hash className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">{room.name}</span>
-              </button>
-            ))}
+            {rooms.map((room) => {
+              const isActive = activeRoomId === room.id;
+              const lastSeen = roomActivity[room.id]?.lastSeen ?? null;
+              const hasUnread = !isActive && isUnread(room.lastMessage, lastSeen);
+
+              return (
+                <button
+                  key={room.id}
+                  data-testid={`button-room-${room.id}`}
+                  onClick={() => { onSelectRoom(room.id); onClose(); }}
+                  className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm transition-colors text-left group ${
+                    isActive
+                      ? "bg-sidebar-primary text-sidebar-primary-foreground"
+                      : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground"
+                  }`}
+                >
+                  {/* Room icon */}
+                  <Hash className={`w-3.5 h-3.5 shrink-0 ${hasUnread ? "text-primary" : ""}`} />
+
+                  {/* Room info */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className={`truncate ${hasUnread ? "font-semibold text-sidebar-foreground" : "font-medium"}`}>
+                        {room.name}
+                      </span>
+                      {room.lastMessage?.createdAt && (
+                        <span className={`text-[10px] shrink-0 ${
+                          isActive ? "text-sidebar-primary-foreground/60"
+                          : hasUnread ? "text-primary font-medium"
+                          : "text-sidebar-foreground/40"
+                        }`}>
+                          {formatShortTime(room.lastMessage.createdAt)}
+                        </span>
+                      )}
+                    </div>
+                    {room.lastMessage && (
+                      <p className={`text-[11px] truncate mt-0.5 ${
+                        isActive ? "text-sidebar-primary-foreground/60"
+                        : hasUnread ? "text-sidebar-foreground/80"
+                        : "text-sidebar-foreground/40"
+                      }`}>
+                        {lastMessagePreview(room.lastMessage, currentUser?.uid ?? "")}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Unread badge */}
+                  {hasUnread && (
+                    <span
+                      data-testid={`badge-unread-${room.id}`}
+                      className="shrink-0 min-w-[18px] h-[18px] px-1 rounded-full bg-primary text-primary-foreground text-[10px] font-bold flex items-center justify-center"
+                    >
+                      •
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+
             {rooms.length === 0 && (
               <p className="px-3 py-2 text-xs text-sidebar-foreground/40 italic">
                 No rooms yet — create one!
@@ -238,13 +293,9 @@ function Sidebar({
               <TooltipTrigger asChild>
                 <div>
                   <UserAvatar
-                    profile={myProfile}
-                    email={currentUser?.email ?? ""}
-                    uid={currentUser?.uid ?? ""}
-                    size="sm"
-                    showOnline
-                    clickable
-                    onUpload={onAvatarUpload}
+                    profile={myProfile} email={currentUser?.email ?? ""}
+                    uid={currentUser?.uid ?? ""} size="sm"
+                    showOnline clickable onUpload={onAvatarUpload}
                   />
                 </div>
               </TooltipTrigger>
@@ -258,9 +309,7 @@ function Sidebar({
             </div>
           </div>
           <button
-            onClick={onSignOut}
-            data-testid="button-sign-out"
-            title="Sign out"
+            onClick={onSignOut} data-testid="button-sign-out" title="Sign out"
             className="text-sidebar-foreground/40 hover:text-sidebar-foreground transition-colors"
           >
             <LogOut className="w-4 h-4" />
@@ -274,9 +323,11 @@ function Sidebar({
 // ─── Message Area ─────────────────────────────────────────────────────────────
 
 function MessageArea({
-  roomId, user, profiles,
+  roomId, user, profiles, onMessageSent,
 }: {
-  roomId: string; user: any; profiles: Record<string, UserProfile>;
+  roomId: string; user: any;
+  profiles: Record<string, UserProfile>;
+  onMessageSent: (payload: Omit<LastMessage, "createdAt">) => void;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState("");
@@ -304,12 +355,13 @@ function MessageArea({
 
   const sendText = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newMessage.trim() || !user) return;
-    const text = newMessage;
+    const text = newMessage.trim();
+    if (!text || !user) return;
     setNewMessage("");
     await addDoc(collection(db, "rooms", roomId, "messages"), {
       text, uid: user.uid, email: user.email, createdAt: serverTimestamp(),
     });
+    onMessageSent({ text, uid: user.uid, email: user.email });
   };
 
   const sendImage = async (file: File) => {
@@ -320,10 +372,11 @@ function MessageArea({
       const path = `message-images/${roomId}/${crypto.randomUUID()}.${ext}`;
       const sRef = storageRef(storage, path);
       await uploadBytes(sRef, file);
-      const url = await getDownloadURL(sRef);
+      const imageURL = await getDownloadURL(sRef);
       await addDoc(collection(db, "rooms", roomId, "messages"), {
-        imageURL: url, uid: user.uid, email: user.email, createdAt: serverTimestamp(),
+        imageURL, uid: user.uid, email: user.email, createdAt: serverTimestamp(),
       });
+      onMessageSent({ imageURL, uid: user.uid, email: user.email });
     } finally {
       setUploading(false);
     }
@@ -360,24 +413,14 @@ function MessageArea({
               )}
 
               <div
-                className={`flex gap-2.5 ${isMe ? "flex-row-reverse" : "flex-row"} ${
-                  isFirstInGroup ? "mt-3" : "mt-0.5"
-                }`}
+                className={`flex gap-2.5 ${isMe ? "flex-row-reverse" : "flex-row"} ${isFirstInGroup ? "mt-3" : "mt-0.5"}`}
                 data-testid={`message-${msg.id}`}
               >
-                {/* Avatar — shown for others on the last msg in a group */}
                 {!isMe ? (
                   <div className="w-9 shrink-0 flex items-end">
-                    {isLastInGroup ? (
-                      <UserAvatar
-                        profile={senderProfile}
-                        email={msg.email}
-                        uid={msg.uid}
-                        size="md"
-                      />
-                    ) : (
-                      <div className="w-9" />
-                    )}
+                    {isLastInGroup
+                      ? <UserAvatar profile={senderProfile} email={msg.email} uid={msg.uid} size="md" />
+                      : <div className="w-9" />}
                   </div>
                 ) : (
                   <div className="w-9 shrink-0" />
@@ -393,20 +436,17 @@ function MessageArea({
                   {msg.imageURL ? (
                     <a href={msg.imageURL} target="_blank" rel="noopener noreferrer">
                       <img
-                        src={msg.imageURL}
-                        alt="Shared image"
+                        src={msg.imageURL} alt="Shared image"
                         className="max-w-[240px] md:max-w-xs rounded-2xl shadow-sm border border-border/30 object-cover"
                         style={{ maxHeight: 300 }}
                       />
                     </a>
                   ) : (
-                    <div
-                      className={`px-4 py-2.5 text-[15px] leading-relaxed shadow-sm ${
-                        isMe
-                          ? "bg-primary text-primary-foreground rounded-2xl rounded-tr-sm"
-                          : "bg-card border border-border/50 text-foreground rounded-2xl rounded-tl-sm"
-                      }`}
-                    >
+                    <div className={`px-4 py-2.5 text-[15px] leading-relaxed shadow-sm ${
+                      isMe
+                        ? "bg-primary text-primary-foreground rounded-2xl rounded-tr-sm"
+                        : "bg-card border border-border/50 text-foreground rounded-2xl rounded-tl-sm"
+                    }`}>
                       {msg.text}
                     </div>
                   )}
@@ -426,41 +466,27 @@ function MessageArea({
 
       {/* Input */}
       <div className="p-3 px-4 md:px-6 bg-background border-t shrink-0">
-        {uploading && (
-          <p className="text-xs text-muted-foreground mb-2 px-1">Uploading image…</p>
-        )}
+        {uploading && <p className="text-xs text-muted-foreground mb-2 px-1">Uploading image…</p>}
         <form onSubmit={sendText} className="flex gap-2 items-center">
           <button
-            type="button"
-            data-testid="button-image-upload"
+            type="button" data-testid="button-image-upload"
             onClick={() => imageInputRef.current?.click()}
             className="shrink-0 w-9 h-9 flex items-center justify-center rounded-full text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
           >
             <ImageIcon className="w-5 h-5" />
           </button>
           <input
-            ref={imageInputRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) sendImage(file);
-              e.target.value = "";
-            }}
+            ref={imageInputRef} type="file" accept="image/*" className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) sendImage(f); e.target.value = ""; }}
           />
           <div className="relative flex-1">
             <Input
-              value={newMessage}
-              onChange={(e) => setNewMessage(e.target.value)}
-              placeholder="Message the room…"
-              data-testid="input-message"
+              value={newMessage} onChange={(e) => setNewMessage(e.target.value)}
+              placeholder="Message the room…" data-testid="input-message"
               className="rounded-full pl-5 pr-12 py-5 bg-card border-border/50 focus-visible:ring-primary/20"
             />
             <Button
-              type="submit"
-              size="icon"
-              disabled={!newMessage.trim() || uploading}
+              type="submit" size="icon" disabled={!newMessage.trim() || uploading}
               data-testid="button-send"
               className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-full w-8 h-8 transition-transform active:scale-95"
             >
@@ -489,12 +515,14 @@ export default function Chat() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const profiles = useUserProfiles();
+  const roomActivity = useRoomActivity(user?.uid);
   usePresence(user);
 
   useEffect(() => {
     if (!loading && !user) setLocation("/");
   }, [user, loading, setLocation]);
 
+  // Subscribe to rooms (now including lastMessage)
   useEffect(() => {
     if (!user) return;
     const q = query(collection(db, "rooms"), orderBy("createdAt", "asc"));
@@ -505,6 +533,31 @@ export default function Chat() {
     });
     return () => unsub();
   }, [user, activeRoomId, setLocation]);
+
+  // Mark room as read when opening it
+  useEffect(() => {
+    if (!activeRoomId || !user) return;
+    setDoc(
+      doc(db, "users", user.uid, "roomActivity", activeRoomId),
+      { lastSeen: serverTimestamp() },
+      { merge: true },
+    );
+  }, [activeRoomId, user]);
+
+  const handleMessageSent = async (payload: Omit<LastMessage, "createdAt">) => {
+    if (!activeRoomId) return;
+    await updateDoc(doc(db, "rooms", activeRoomId), {
+      lastMessage: { ...payload, createdAt: serverTimestamp() },
+    });
+    // Also mark as read for the sender immediately
+    if (user) {
+      setDoc(
+        doc(db, "users", user.uid, "roomActivity", activeRoomId),
+        { lastSeen: serverTimestamp() },
+        { merge: true },
+      );
+    }
+  };
 
   const handleCreateRoom = async () => {
     const name = newRoomName.trim();
@@ -521,8 +574,7 @@ export default function Chat() {
   const handleAvatarUpload = async (file: File) => {
     if (!user) return;
     const ext = file.name.split(".").pop();
-    const path = `avatars/${user.uid}.${ext}`;
-    const sRef = storageRef(storage, path);
+    const sRef = storageRef(storage, `avatars/${user.uid}.${ext}`);
     await uploadBytes(sRef, file);
     const url = await getDownloadURL(sRef);
     await setDoc(doc(db, "users", user.uid), { photoURL: url }, { merge: true });
@@ -539,6 +591,7 @@ export default function Chat() {
         activeRoomId={activeRoomId}
         profiles={profiles}
         currentUser={user}
+        roomActivity={roomActivity}
         onSelectRoom={(id) => setLocation(`/chat/${id}`)}
         onCreateRoom={() => setShowCreateDialog(true)}
         onSignOut={() => signOut(auth)}
@@ -551,8 +604,7 @@ export default function Chat() {
         <header className="h-16 border-b flex items-center px-4 gap-3 shrink-0 bg-background">
           <button
             className="md:hidden text-muted-foreground hover:text-foreground transition-colors"
-            onClick={() => setSidebarOpen(true)}
-            data-testid="button-menu"
+            onClick={() => setSidebarOpen(true)} data-testid="button-menu"
           >
             <Menu className="w-5 h-5" />
           </button>
@@ -562,13 +614,7 @@ export default function Chat() {
               <h2 className="font-semibold text-foreground truncate">{activeRoom.name}</h2>
               <div className="ml-auto flex items-center gap-1.5">
                 {Object.values(profiles).filter((p) => p.online).slice(0, 5).map((p) => (
-                  <UserAvatar
-                    key={p.uid}
-                    profile={p}
-                    email={p.email}
-                    uid={p.uid}
-                    size="sm"
-                  />
+                  <UserAvatar key={p.uid} profile={p} email={p.email} uid={p.uid} size="sm" />
                 ))}
                 {Object.values(profiles).filter((p) => p.online).length > 5 && (
                   <span className="text-xs text-muted-foreground">
@@ -583,16 +629,17 @@ export default function Chat() {
         </header>
 
         {activeRoomId ? (
-          <MessageArea roomId={activeRoomId} user={user} profiles={profiles} />
+          <MessageArea
+            roomId={activeRoomId} user={user} profiles={profiles}
+            onMessageSent={handleMessageSent}
+          />
         ) : (
           <div className="flex-1 flex items-center justify-center flex-col gap-3 text-center px-8">
             <div className="w-12 h-12 rounded-2xl bg-primary/10 flex items-center justify-center">
               <Hash className="w-6 h-6 text-primary" />
             </div>
             <p className="font-semibold text-foreground">No room selected</p>
-            <p className="text-sm text-muted-foreground">
-              Pick a room from the sidebar or create a new one.
-            </p>
+            <p className="text-sm text-muted-foreground">Pick a room from the sidebar or create a new one.</p>
             <Button size="sm" onClick={() => setShowCreateDialog(true)}>
               <Plus className="w-4 h-4 mr-1.5" />
               Create a room
@@ -608,8 +655,7 @@ export default function Chat() {
           </DialogHeader>
           <Input
             placeholder="e.g. general, design, engineering"
-            value={newRoomName}
-            onChange={(e) => setNewRoomName(e.target.value)}
+            value={newRoomName} onChange={(e) => setNewRoomName(e.target.value)}
             data-testid="input-room-name"
             onKeyDown={(e) => e.key === "Enter" && handleCreateRoom()}
             autoFocus
@@ -617,8 +663,7 @@ export default function Chat() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowCreateDialog(false)}>Cancel</Button>
             <Button
-              onClick={handleCreateRoom}
-              disabled={!newRoomName.trim() || creating}
+              onClick={handleCreateRoom} disabled={!newRoomName.trim() || creating}
               data-testid="button-confirm-create-room"
             >
               {creating ? "Creating…" : "Create"}
