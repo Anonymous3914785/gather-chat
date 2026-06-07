@@ -11,15 +11,18 @@ import { useAuth } from "@/contexts/auth-context";
 import { usePresence } from "@/hooks/use-presence";
 import { useUserProfiles } from "@/hooks/use-user-profiles";
 import { useRoomActivity } from "@/hooks/use-room-activity";
+import { useFcm } from "@/hooks/use-fcm";
+import { ReactionBar, ReactionChips } from "@/components/reaction-bar";
 import type { UserProfile } from "@/hooks/use-user-profiles";
 import { format, isToday, isYesterday } from "date-fns";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { LogOut, Send, MessageCircle, Plus, Hash, ImageIcon, Menu, X, Camera } from "lucide-react";
+import { LogOut, Send, MessageCircle, Plus, Hash, ImageIcon, Menu, X, Camera, Bell, BellOff } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -45,6 +48,7 @@ interface Message {
   uid: string;
   email: string;
   createdAt: Timestamp | null;
+  reactions?: Record<string, Record<string, boolean>>;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -151,22 +155,64 @@ function UserAvatar({
   );
 }
 
+// ─── Sidebar Skeletons ────────────────────────────────────────────────────────
+
+function SidebarSkeletons() {
+  return (
+    <div className="space-y-1 px-2 pt-2">
+      {[1, 2, 3].map((i) => (
+        <div key={i} className="flex items-center gap-2.5 px-3 py-2.5 rounded-lg">
+          <Skeleton className="w-3.5 h-3.5 rounded-sm shrink-0" />
+          <div className="flex-1 space-y-1.5">
+            <div className="flex justify-between">
+              <Skeleton className="h-3 w-24 rounded" />
+              <Skeleton className="h-2.5 w-10 rounded" />
+            </div>
+            <Skeleton className="h-2.5 w-36 rounded" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Message Skeletons ────────────────────────────────────────────────────────
+
+function MessageSkeletons() {
+  return (
+    <div className="flex-1 flex flex-col gap-4 p-4 md:p-6">
+      {[
+        { me: false, w: "w-48" }, { me: false, w: "w-64" },
+        { me: true, w: "w-40" }, { me: true, w: "w-56" },
+        { me: false, w: "w-52" }, { me: true, w: "w-32" },
+      ].map((item, i) => (
+        <div key={i} className={`flex gap-2.5 ${item.me ? "flex-row-reverse" : "flex-row"}`}>
+          {!item.me && <Skeleton className="w-9 h-9 rounded-full shrink-0 self-end" />}
+          {item.me && <div className="w-9 shrink-0" />}
+          <div className={`flex flex-col gap-1 max-w-[60%] ${item.me ? "items-end" : "items-start"}`}>
+            {!item.me && <Skeleton className="h-2.5 w-16 rounded" />}
+            <Skeleton className={`h-10 ${item.w} rounded-2xl`} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 
 function Sidebar({
-  rooms, activeRoomId, profiles, currentUser, roomActivity, onSelectRoom,
-  onCreateRoom, onSignOut, onAvatarUpload, open, onClose,
+  rooms, activeRoomId, profiles, currentUser, roomActivity, loadingRooms,
+  onSelectRoom, onCreateRoom, onSignOut, onAvatarUpload, open, onClose,
+  notifPermission, onEnableNotifications,
 }: {
-  rooms: Room[]; activeRoomId: string | null;
-  profiles: Record<string, UserProfile>;
-  currentUser: any;
+  rooms: Room[]; activeRoomId: string | null; loadingRooms: boolean;
+  profiles: Record<string, UserProfile>; currentUser: any;
   roomActivity: Record<string, { lastSeen: Timestamp | null }>;
-  onSelectRoom: (id: string) => void;
-  onCreateRoom: () => void;
-  onSignOut: () => void;
-  onAvatarUpload: (file: File) => void;
-  open: boolean;
-  onClose: () => void;
+  onSelectRoom: (id: string) => void; onCreateRoom: () => void;
+  onSignOut: () => void; onAvatarUpload: (file: File) => void;
+  open: boolean; onClose: () => void;
+  notifPermission: NotificationPermission; onEnableNotifications: () => void;
 }) {
   const myProfile = profiles[currentUser?.uid ?? ""];
   const onlineCount = Object.values(profiles).filter((p) => p.online).length;
@@ -190,9 +236,30 @@ function Sidebar({
             </div>
             <span className="font-bold text-sidebar-foreground tracking-tight text-lg">Gather</span>
           </div>
-          <button onClick={onClose} className="md:hidden text-sidebar-foreground/50 hover:text-sidebar-foreground">
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-1">
+            {/* Notification bell */}
+            {notifPermission !== "granted" && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={onEnableNotifications}
+                    className="w-7 h-7 flex items-center justify-center rounded text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent transition-colors"
+                  >
+                    <Bell className="w-3.5 h-3.5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">Enable push notifications</TooltipContent>
+              </Tooltip>
+            )}
+            {notifPermission === "granted" && (
+              <span title="Notifications enabled" className="w-7 h-7 flex items-center justify-center text-emerald-400">
+                <Bell className="w-3.5 h-3.5" />
+              </span>
+            )}
+            <button onClick={onClose} className="md:hidden text-sidebar-foreground/50 hover:text-sidebar-foreground">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Online pill */}
@@ -218,72 +285,77 @@ function Sidebar({
             </button>
           </div>
 
-          <div className="space-y-0.5">
-            {rooms.map((room) => {
-              const isActive = activeRoomId === room.id;
-              const lastSeen = roomActivity[room.id]?.lastSeen ?? null;
-              const hasUnread = !isActive && isUnread(room.lastMessage, lastSeen);
+          {loadingRooms ? (
+            <SidebarSkeletons />
+          ) : (
+            <div className="space-y-0.5">
+              {rooms.map((room) => {
+                const isActive = activeRoomId === room.id;
+                const lastSeen = roomActivity[room.id]?.lastSeen ?? null;
+                const hasUnread = !isActive && isUnread(room.lastMessage, lastSeen);
 
-              return (
-                <button
-                  key={room.id}
-                  data-testid={`button-room-${room.id}`}
-                  onClick={() => { onSelectRoom(room.id); onClose(); }}
-                  className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm transition-colors text-left group ${
-                    isActive
-                      ? "bg-sidebar-primary text-sidebar-primary-foreground"
-                      : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground"
-                  }`}
-                >
-                  {/* Room icon */}
-                  <Hash className={`w-3.5 h-3.5 shrink-0 ${hasUnread ? "text-primary" : ""}`} />
-
-                  {/* Room info */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-1">
-                      <span className={`truncate ${hasUnread ? "font-semibold text-sidebar-foreground" : "font-medium"}`}>
-                        {room.name}
-                      </span>
-                      {room.lastMessage?.createdAt && (
-                        <span className={`text-[10px] shrink-0 ${
+                return (
+                  <button
+                    key={room.id}
+                    data-testid={`button-room-${room.id}`}
+                    onClick={() => { onSelectRoom(room.id); onClose(); }}
+                    className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm transition-colors text-left group ${
+                      isActive
+                        ? "bg-sidebar-primary text-sidebar-primary-foreground"
+                        : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground"
+                    }`}
+                  >
+                    <Hash className={`w-3.5 h-3.5 shrink-0 ${hasUnread ? "text-primary" : ""}`} />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className={`truncate ${hasUnread ? "font-semibold text-sidebar-foreground" : "font-medium"}`}>
+                          {room.name}
+                        </span>
+                        {room.lastMessage?.createdAt && (
+                          <span className={`text-[10px] shrink-0 ${
+                            isActive ? "text-sidebar-primary-foreground/60"
+                            : hasUnread ? "text-primary font-medium"
+                            : "text-sidebar-foreground/40"
+                          }`}>
+                            {formatShortTime(room.lastMessage.createdAt)}
+                          </span>
+                        )}
+                      </div>
+                      {room.lastMessage && (
+                        <p className={`text-[11px] truncate mt-0.5 ${
                           isActive ? "text-sidebar-primary-foreground/60"
-                          : hasUnread ? "text-primary font-medium"
+                          : hasUnread ? "text-sidebar-foreground/80"
                           : "text-sidebar-foreground/40"
                         }`}>
-                          {formatShortTime(room.lastMessage.createdAt)}
-                        </span>
+                          {lastMessagePreview(room.lastMessage, currentUser?.uid ?? "")}
+                        </p>
                       )}
                     </div>
-                    {room.lastMessage && (
-                      <p className={`text-[11px] truncate mt-0.5 ${
-                        isActive ? "text-sidebar-primary-foreground/60"
-                        : hasUnread ? "text-sidebar-foreground/80"
-                        : "text-sidebar-foreground/40"
-                      }`}>
-                        {lastMessagePreview(room.lastMessage, currentUser?.uid ?? "")}
-                      </p>
+                    {hasUnread && (
+                      <span
+                        data-testid={`badge-unread-${room.id}`}
+                        className="shrink-0 min-w-[18px] h-[18px] px-1 rounded-full bg-primary text-primary-foreground text-[10px] font-bold flex items-center justify-center"
+                      >
+                        •
+                      </span>
                     )}
-                  </div>
+                  </button>
+                );
+              })}
 
-                  {/* Unread badge */}
-                  {hasUnread && (
-                    <span
-                      data-testid={`badge-unread-${room.id}`}
-                      className="shrink-0 min-w-[18px] h-[18px] px-1 rounded-full bg-primary text-primary-foreground text-[10px] font-bold flex items-center justify-center"
-                    >
-                      •
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-
-            {rooms.length === 0 && (
-              <p className="px-3 py-2 text-xs text-sidebar-foreground/40 italic">
-                No rooms yet — create one!
-              </p>
-            )}
-          </div>
+              {rooms.length === 0 && (
+                <div className="px-3 py-6 text-center">
+                  <p className="text-xs text-sidebar-foreground/40 italic">No rooms yet</p>
+                  <button
+                    onClick={onCreateRoom}
+                    className="mt-2 text-xs text-primary hover:underline"
+                  >
+                    Create your first room →
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* User footer */}
@@ -330,13 +402,17 @@ function MessageArea({
   onMessageSent: (payload: Omit<LastMessage, "createdAt">) => void;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
+  const [loadingMessages, setLoadingMessages] = useState(true);
   const [newMessage, setNewMessage] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [hoveredMsgId, setHoveredMsgId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setMessages([]);
+    setLoadingMessages(true);
     const q = query(
       collection(db, "rooms", roomId, "messages"),
       orderBy("createdAt", "desc"),
@@ -345,6 +421,7 @@ function MessageArea({
     const unsub = onSnapshot(q, (snap) => {
       const msgs = snap.docs.map((d) => ({ id: d.id, ...d.data() })) as Message[];
       setMessages(msgs.reverse());
+      setLoadingMessages(false);
     });
     return () => unsub();
   }, [roomId]);
@@ -352,6 +429,11 @@ function MessageArea({
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Re-focus input after upload
+  useEffect(() => {
+    if (!uploading) inputRef.current?.focus();
+  }, [uploading]);
 
   const sendText = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -382,12 +464,17 @@ function MessageArea({
     }
   };
 
+  if (loadingMessages) return <MessageSkeletons />;
+
   return (
     <>
       <div className="flex-1 overflow-y-auto p-4 px-4 md:px-6 flex flex-col space-y-1 bg-card/20">
         {messages.length === 0 && (
-          <div className="flex-1 flex items-center justify-center">
-            <p className="text-sm text-muted-foreground italic">No messages yet — say hello!</p>
+          <div className="flex-1 flex items-center justify-center flex-col gap-2 text-center">
+            <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
+              <MessageCircle className="w-5 h-5 text-primary" />
+            </div>
+            <p className="text-sm text-muted-foreground">No messages yet — say hello!</p>
           </div>
         )}
 
@@ -399,6 +486,7 @@ function MessageArea({
           const isFirstInGroup = showDateDivider || !prev || prev.uid !== msg.uid;
           const isLastInGroup = !next || next.uid !== msg.uid || !isSameDay(msg.createdAt, next?.createdAt);
           const senderProfile = profiles[msg.uid];
+          const isHovered = hoveredMsgId === msg.id;
 
           return (
             <div key={msg.id}>
@@ -415,6 +503,8 @@ function MessageArea({
               <div
                 className={`flex gap-2.5 ${isMe ? "flex-row-reverse" : "flex-row"} ${isFirstInGroup ? "mt-3" : "mt-0.5"}`}
                 data-testid={`message-${msg.id}`}
+                onMouseEnter={() => setHoveredMsgId(msg.id)}
+                onMouseLeave={() => setHoveredMsgId(null)}
               >
                 {!isMe ? (
                   <div className="w-9 shrink-0 flex items-end">
@@ -433,23 +523,37 @@ function MessageArea({
                     </span>
                   )}
 
-                  {msg.imageURL ? (
-                    <a href={msg.imageURL} target="_blank" rel="noopener noreferrer">
-                      <img
-                        src={msg.imageURL} alt="Shared image"
-                        className="max-w-[240px] md:max-w-xs rounded-2xl shadow-sm border border-border/30 object-cover"
-                        style={{ maxHeight: 300 }}
-                      />
-                    </a>
-                  ) : (
-                    <div className={`px-4 py-2.5 text-[15px] leading-relaxed shadow-sm ${
-                      isMe
-                        ? "bg-primary text-primary-foreground rounded-2xl rounded-tr-sm"
-                        : "bg-card border border-border/50 text-foreground rounded-2xl rounded-tl-sm"
-                    }`}>
-                      {msg.text}
-                    </div>
-                  )}
+                  {/* Bubble + reaction picker */}
+                  <div className="relative">
+                    <ReactionBar
+                      roomId={roomId} msgId={msg.id} uid={user.uid}
+                      reactions={msg.reactions} isMe={isMe} visible={isHovered}
+                    />
+
+                    {msg.imageURL ? (
+                      <a href={msg.imageURL} target="_blank" rel="noopener noreferrer">
+                        <img
+                          src={msg.imageURL} alt="Shared image"
+                          className="max-w-[240px] md:max-w-xs rounded-2xl shadow-sm border border-border/30 object-cover"
+                          style={{ maxHeight: 300 }}
+                        />
+                      </a>
+                    ) : (
+                      <div className={`px-4 py-2.5 text-[15px] leading-relaxed shadow-sm ${
+                        isMe
+                          ? "bg-primary text-primary-foreground rounded-2xl rounded-tr-sm"
+                          : "bg-card border border-border/50 text-foreground rounded-2xl rounded-tl-sm"
+                      }`}>
+                        {msg.text}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Reaction chips */}
+                  <ReactionChips
+                    roomId={roomId} msgId={msg.id}
+                    uid={user.uid} reactions={msg.reactions}
+                  />
 
                   {isLastInGroup && (
                     <span className="text-[11px] text-muted-foreground/60 mt-1 mx-1">
@@ -466,12 +570,18 @@ function MessageArea({
 
       {/* Input */}
       <div className="p-3 px-4 md:px-6 bg-background border-t shrink-0">
-        {uploading && <p className="text-xs text-muted-foreground mb-2 px-1">Uploading image…</p>}
+        {uploading && (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2 px-1">
+            <span className="w-3 h-3 border-2 border-primary/30 border-t-primary rounded-full animate-spin inline-block" />
+            Uploading image…
+          </div>
+        )}
         <form onSubmit={sendText} className="flex gap-2 items-center">
           <button
             type="button" data-testid="button-image-upload"
             onClick={() => imageInputRef.current?.click()}
-            className="shrink-0 w-9 h-9 flex items-center justify-center rounded-full text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+            disabled={uploading}
+            className="shrink-0 w-9 h-9 flex items-center justify-center rounded-full text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40"
           >
             <ImageIcon className="w-5 h-5" />
           </button>
@@ -481,6 +591,7 @@ function MessageArea({
           />
           <div className="relative flex-1">
             <Input
+              ref={inputRef}
               value={newMessage} onChange={(e) => setNewMessage(e.target.value)}
               placeholder="Message the room…" data-testid="input-message"
               className="rounded-full pl-5 pr-12 py-5 bg-card border-border/50 focus-visible:ring-primary/20"
@@ -509,6 +620,7 @@ export default function Chat() {
   const activeRoomId = params?.roomId ?? null;
 
   const [rooms, setRooms] = useState<Room[]>([]);
+  const [loadingRooms, setLoadingRooms] = useState(true);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [newRoomName, setNewRoomName] = useState("");
   const [creating, setCreating] = useState(false);
@@ -516,19 +628,20 @@ export default function Chat() {
 
   const profiles = useUserProfiles();
   const roomActivity = useRoomActivity(user?.uid);
+  const { permission: notifPermission, requestPermission } = useFcm(user?.uid);
   usePresence(user);
 
   useEffect(() => {
     if (!loading && !user) setLocation("/");
   }, [user, loading, setLocation]);
 
-  // Subscribe to rooms (now including lastMessage)
   useEffect(() => {
     if (!user) return;
     const q = query(collection(db, "rooms"), orderBy("createdAt", "asc"));
     const unsub = onSnapshot(q, (snap) => {
       const r = snap.docs.map((d) => ({ id: d.id, ...d.data() })) as Room[];
       setRooms(r);
+      setLoadingRooms(false);
       if (!activeRoomId && r.length > 0) setLocation(`/chat/${r[0].id}`);
     });
     return () => unsub();
@@ -549,7 +662,6 @@ export default function Chat() {
     await updateDoc(doc(db, "rooms", activeRoomId), {
       lastMessage: { ...payload, createdAt: serverTimestamp() },
     });
-    // Also mark as read for the sender immediately
     if (user) {
       setDoc(
         doc(db, "users", user.uid, "roomActivity", activeRoomId),
@@ -580,7 +692,24 @@ export default function Chat() {
     await setDoc(doc(db, "users", user.uid), { photoURL: url }, { merge: true });
   };
 
-  if (loading || !user) return null;
+  if (loading || !user) return (
+    <div className="flex h-screen bg-background items-center justify-center">
+      <div className="flex flex-col items-center gap-3">
+        <div className="w-10 h-10 bg-primary text-primary-foreground rounded-xl flex items-center justify-center">
+          <MessageCircle className="w-5 h-5" />
+        </div>
+        <div className="flex gap-1.5">
+          {[0, 1, 2].map((i) => (
+            <span
+              key={i}
+              className="w-2 h-2 rounded-full bg-primary/40 animate-bounce"
+              style={{ animationDelay: `${i * 0.15}s` }}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 
   const activeRoom = rooms.find((r) => r.id === activeRoomId);
 
@@ -592,12 +721,15 @@ export default function Chat() {
         profiles={profiles}
         currentUser={user}
         roomActivity={roomActivity}
+        loadingRooms={loadingRooms}
         onSelectRoom={(id) => setLocation(`/chat/${id}`)}
         onCreateRoom={() => setShowCreateDialog(true)}
         onSignOut={() => signOut(auth)}
         onAvatarUpload={handleAvatarUpload}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        notifPermission={notifPermission}
+        onEnableNotifications={requestPermission}
       />
 
       <main className="flex-1 flex flex-col overflow-hidden min-w-0">

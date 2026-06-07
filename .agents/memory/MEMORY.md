@@ -1,0 +1,2 @@
+- [Gather chat data model](gather-data-model.md) — Firestore structure, reaction storage pattern, and denormalized lastMessage approach.
+- [Gather PWA + push setup](gather-pwa-push.md) — vite-plugin-pwa config, FCM service worker location, and what's needed for push delivery.
