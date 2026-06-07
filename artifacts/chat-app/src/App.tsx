@@ -14,6 +14,7 @@ function Router() {
     <Switch>
       <Route path="/" component={Login} />
       <Route path="/chat" component={Chat} />
+      <Route path="/chat/:roomId" component={Chat} />
       <Route component={NotFound} />
     </Switch>
   );
